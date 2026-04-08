@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { 
   PlusCircle, 
   ArrowUpCircle, 
@@ -8,7 +8,10 @@ import {
   PieChart as PieChartIcon,
   Trash2,
   TrendingUp,
-  TrendingDown
+  TrendingDown,
+  LogOut,
+  User as UserIcon,
+  Loader2
 } from 'lucide-react';
 import { 
   PieChart, 
@@ -23,6 +26,9 @@ import {
 } from 'recharts';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { supabase } from './lib/supabaseClient';
+import Auth from './components/Auth';
+import type { Session } from '@supabase/supabase-js';
 
 // Utility for Tailwind classes
 function cn(...inputs: ClassValue[]) {
@@ -39,6 +45,7 @@ interface Transaction {
   category: string;
   date: string;
   type: TransactionType;
+  user_id: string;
 }
 
 const CATEGORIES = {
@@ -53,18 +60,48 @@ const COLORS = {
 };
 
 export default function App() {
-  const [transactions, setTransactions] = useState<Transaction[]>([
-    { id: '1', description: 'Salaire Mars', amount: 2500, category: 'Salaire', date: '2026-03-25', type: 'income' },
-    { id: '2', description: 'Courses Carrefour', amount: 85.50, category: 'Alimentation', date: '2026-03-26', type: 'expense' },
-    { id: '3', description: 'Loyer', amount: 800, category: 'Loyer', date: '2026-04-01', type: 'expense' },
-    { id: '4', description: 'Vente Vinted', amount: 45, category: 'Autre', date: '2026-04-02', type: 'income' },
-    { id: '5', description: 'Netflix', amount: 13.99, category: 'Loisirs', date: '2026-04-05', type: 'expense' },
-  ]);
-
+  const [session, setSession] = useState<Session | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState('');
   const [type, setType] = useState<TransactionType>('expense');
   const [category, setCategory] = useState(CATEGORIES.expense[0]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Auth session listener
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Fetch transactions from Supabase
+  useEffect(() => {
+    if (session?.user.id) {
+      fetchTransactions();
+    }
+  }, [session]);
+
+  const fetchTransactions = async () => {
+    const { data, error } = await supabase
+      .from('transactions')
+      .select('*')
+      .order('date', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching transactions:', error);
+    } else {
+      setTransactions(data || []);
+    }
+  };
 
   // Calculations
   const { totalIncome, totalExpenses, balance } = useMemo(() => {
@@ -100,27 +137,65 @@ export default function App() {
   }, [totalIncome, totalExpenses]);
 
   // Handlers
-  const addTransaction = (e: React.FormEvent) => {
+  const addTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!description || !amount) return;
+    if (!description || !amount || !session?.user.id) return;
 
-    const newTransaction: Transaction = {
-      id: crypto.randomUUID(),
+    setIsSubmitting(true);
+    const newTransaction = {
       description,
       amount: parseFloat(amount),
       category,
       type,
       date: new Date().toISOString().split('T')[0],
+      user_id: session.user.id
     };
 
-    setTransactions([newTransaction, ...transactions]);
-    setDescription('');
-    setAmount('');
+    const { data, error } = await supabase
+      .from('transactions')
+      .insert([newTransaction])
+      .select();
+
+    if (error) {
+      console.error('Error adding transaction:', error);
+      alert('Erreur lors de l\'ajout de la transaction');
+    } else if (data) {
+      setTransactions([data[0], ...transactions]);
+      setDescription('');
+      setAmount('');
+    }
+    setIsSubmitting(false);
   };
 
-  const deleteTransaction = (id: string) => {
-    setTransactions(transactions.filter(t => t.id !== id));
+  const deleteTransaction = async (id: string) => {
+    const { error } = await supabase
+      .from('transactions')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      console.error('Error deleting transaction:', error);
+      alert('Erreur lors de la suppression');
+    } else {
+      setTransactions(transactions.filter(t => t.id !== id));
+    }
   };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <Auth />;
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans p-4 md:p-8">
@@ -131,11 +206,24 @@ export default function App() {
             <h1 className="text-3xl font-bold tracking-tight text-slate-900">Gestion de Budget</h1>
             <p className="text-slate-500">Suivez vos finances en un clin d'œil</p>
           </div>
-          <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-xl shadow-sm border border-slate-200">
-            <Wallet className="w-5 h-5 text-blue-500" />
-            <span className="font-semibold text-lg">
-              {balance.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}
-            </span>
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-3 bg-white px-4 py-2 rounded-xl shadow-sm border border-slate-200">
+              <UserIcon className="w-4 h-4 text-slate-400" />
+              <span className="text-sm font-medium text-slate-600">{session.user.email}</span>
+            </div>
+            <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-xl shadow-sm border border-slate-200">
+              <Wallet className="w-5 h-5 text-blue-500" />
+              <span className="font-semibold text-lg">
+                {balance.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}
+              </span>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="p-2.5 bg-white text-slate-500 hover:text-rose-600 rounded-xl shadow-sm border border-slate-200 transition-colors"
+              title="Se déconnecter"
+            >
+              <LogOut className="w-5 h-5" />
+            </button>
           </div>
         </header>
 
@@ -243,10 +331,17 @@ export default function App() {
                 </div>
                 <button
                   type="submit"
-                  className="md:col-span-2 mt-2 w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2 shadow-sm"
+                  disabled={isSubmitting}
+                  className="md:col-span-2 mt-2 w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
                 >
-                  <PlusCircle className="w-5 h-5" />
-                  Ajouter la transaction
+                  {isSubmitting ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <>
+                      <PlusCircle className="w-5 h-5" />
+                      Ajouter la transaction
+                    </>
+                  )}
                 </button>
               </form>
             </section>
